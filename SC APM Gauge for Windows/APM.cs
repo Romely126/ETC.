@@ -3,7 +3,7 @@
 //  빌드: build.bat (Windows 내장 .NET Framework 4.x csc.exe 사용, C# 5 문법)
 //
 //  [투명성 원칙]
-//   - 어떤 키를 눌렀는지 기록하지 않습니다. 입력이 있었다는 사실만 숫자 하나(APM 카운터)로 메모리에 반영합니다.
+//   - 어떤 키를 눌렀는지 기록하지 않습니다. 입력 "시각"만 최근 5초치를 메모리에 보관합니다.
 //   - 파일 쓰기, 레지스트리 접근, 네트워크 통신 코드가 전혀 없습니다.
 //   - vkCode는 "키를 꾹 누를 때 생기는 자동반복(auto-repeat)"을 걸러내는 용도로만 읽고 즉시 버립니다.
 //
@@ -102,30 +102,36 @@ namespace ApmMeter
     }
 
     // ------------------------------------------------------------------
-    //  APM 계산 엔진 (스타크래프트식 지수 감쇠 + 빠른 휴지 감쇠)
+    //  APM 계산 엔진 (속도계 방식)
     //
-    //  1) 스타크래프트 계열 APM 계산기(APMAlert, BWAPI)와 같은 원리
-    //     과거 동작을 시간에 따라 지수적으로 잊어버리는 누적 카운터를 사용.
-    //     감쇠 시상수가 60초이므로 동작 1회 = 정확히 +1 APM 이고,
-    //     같은 속도로 계속 치면 표시값이 실제 분당 속도로 수렴함.
+    //  자동차 속도계처럼 "지금 이 페이스로 1분 동안 계속하면 몇 번인가"를 보여줌.
     //
-    //  2) 빠른 휴지 감쇠 (업무용으로 추가한 규칙)
-    //     마지막 입력 후 IdleGraceSec(0.4초)가 지나면 추가 감쇠를 걸어
-    //     손을 떼는 즉시 주르륵 떨어짐.
-    //     예) 233 APM에서 손을 떼면: 0.5초 후 162, 1초 후 78, 2초 후 18, 3초 후 4.
+    //  1) 최근 WindowSec(5초) 동안의 입력 시각만 보관
+    //  2) 현재 페이스 = 창 안의 입력 횟수 ÷ 측정 시간 × 60
+    //     - 측정 시간 = "치기 시작한 순간부터 지금까지"(최소 1초, 최대 5초)
+    //       → 막 치기 시작해도 바로 반응: 1초에 5번 누르면 곧바로 300
+    //       → 계속 치면 최근 5초 평균으로 안정: 300 페이스면 정확히 300
+    //  3) 손을 떼면 창에서 입력이 하나씩 빠져나가면서 평균 페이스가 내려감
+    //       예) 300으로 치다 멈추면 1초 후 약 240, 3초 후 약 120, 5초 후 0
+    //       예) 1초에 5번 치고 멈추면 2초 후 150, 3초 후 100, 약 6초 후 0
+    //  4) 화면 숫자는 계산값을 부드럽게 따라가며 최소 1씩 움직임 (튀지 않게)
     // ------------------------------------------------------------------
     sealed class ApmEngine
     {
-        const double DecayTauSec = 60.0;   // 기본 감쇠 시상수 (SC식 약 1분). 동작 1회 = +60/이 값
-        const double IdleGraceSec = 0.4;   // 이 시간 동안 입력이 없으면 "손을 뗐다"고 판단
-        const double IdleTauSec = 0.7;     // 손을 뗐을 때 떨어지는 속도 (작을수록 빠르게)
+        const double WindowSec = 5.0;      // 평균을 내는 최근 시간 (5~10초 권장)
+        const double MinSpanSec = 1.0;     // 막 치기 시작했을 때의 최소 측정 시간
+        const double FollowTau = 0.25;     // 화면 숫자가 따라가는 속도 (작을수록 즉각적)
+        const int MaxEvents = 8192;        // 버퍼 상한 (안전장치)
 
+        readonly Queue<long> events = new Queue<long>();
         readonly Stopwatch clock = Stopwatch.StartNew();
         readonly double freq = Stopwatch.Frequency;
+        readonly long windowTicks;
+        long sessionStart;                 // 쉬었다가 다시 치기 시작한 시각
         long lastUpdate;
-        long lastHit;
-        bool anyHit;
-        double counter;                    // 지수 감쇠 누적 카운터 (= 현재 APM)
+        double shown;
+
+        public ApmEngine() { windowTicks = (long)(WindowSec * freq); }
 
         public long Now { get { return clock.ElapsedTicks; } }
 
@@ -133,25 +139,38 @@ namespace ApmMeter
 
         public void Hit(long t)
         {
-            counter += 60.0 / DecayTauSec;   // 동작 1회 = +1 APM
-            lastHit = t;
-            anyHit = true;
+            if (events.Count == 0) sessionStart = t;
+            if (events.Count < MaxEvents) events.Enqueue(t);
         }
 
         public int Update()
         {
             long now = clock.ElapsedTicks;
+
+            // 창 밖으로 나간 입력 제거
+            while (events.Count > 0 && now - events.Peek() >= windowTicks) events.Dequeue();
+
+            // 현재 페이스 (분당 환산)
+            double target = 0;
+            if (events.Count > 0)
+            {
+                double span = (now - sessionStart) / freq;
+                if (span < MinSpanSec) span = MinSpanSec;
+                if (span > WindowSec) span = WindowSec;
+                target = events.Count / span * 60.0;
+            }
+
+            // 화면 숫자는 부드럽게 따라감
             double dt = (lastUpdate == 0) ? 0.05 : (now - lastUpdate) / freq;
             lastUpdate = now;
             if (dt > 0.5) dt = 0.5;
+            double diff = target - shown, absDiff = Math.Abs(diff);
+            double step = absDiff * (1.0 - Math.Exp(-dt / FollowTau));
+            if (step < 1.0) step = Math.Min(1.0, absDiff);
+            shown += Math.Sign(diff) * step;
+            if (target == 0 && shown < 1.0) shown = 0;
 
-            double rate = 1.0 / DecayTauSec;
-            if (!anyHit || (now - lastHit) / freq > IdleGraceSec)
-                rate += 1.0 / IdleTauSec;          // 손을 뗐으면 빠르게 감쇠
-
-            counter *= Math.Exp(-dt * rate);
-            if (counter < 0.5) counter = 0.0;
-            return (int)Math.Round(counter);
+            return (int)Math.Round(shown);
         }
     }
 
