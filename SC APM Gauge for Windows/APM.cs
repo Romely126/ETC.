@@ -118,7 +118,7 @@ namespace ApmMeter
     // ------------------------------------------------------------------
     sealed class ApmEngine
     {
-        const double WindowSec = 5.0;      // 평균을 내는 최근 시간 (5~10초 권장)
+        const double WindowSec = 10.0;      // 평균을 내는 최근 시간 (5~10초 권장)
         const double MinSpanSec = 1.0;     // 막 치기 시작했을 때의 최소 측정 시간
         const double FollowTau = 0.25;     // 화면 숫자가 따라가는 속도 (작을수록 즉각적)
         const int MaxEvents = 8192;        // 버퍼 상한 (안전장치)
