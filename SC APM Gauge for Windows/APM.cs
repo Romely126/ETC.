@@ -124,7 +124,7 @@ namespace ApmMeter
     sealed class ApmEngine
     {
         double windowSec = 5.0;            // 평균을 내는 최근 시간 (설정 창에서 변경)
-        const double MinSpanSec = 1.0;     // 막 치기 시작했을 때의 최소 측정 시간
+        double minSpanSec = 2.5;           // 막 치기 시작했을 때의 최소 측정 시간 (설정 창의 "시작 완충")
         const double FollowTau = 0.25;     // 화면 숫자가 따라가는 속도 (작을수록 즉각적)
         const int MaxEvents = 8192;        // 버퍼 상한 (안전장치)
 
@@ -142,6 +142,14 @@ namespace ApmMeter
         {
             get { return windowSec; }
             set { windowSec = Math.Max(1.0, Math.Min(30.0, value)); windowTicks = (long)(windowSec * freq); }
+        }
+
+        // 쉬었다가 치기 시작할 때 첫 몇 타로 수치가 튀지 않게 하는 완충 시간
+        //   1초 → 키 1번에 60, 2.5초 → 키 1번에 24
+        public double MinSpanSec
+        {
+            get { return minSpanSec; }
+            set { minSpanSec = Math.Max(0.5, Math.Min(windowSec, value)); }
         }
 
         public long Now { get { return clock.ElapsedTicks; } }
@@ -166,7 +174,7 @@ namespace ApmMeter
             if (events.Count > 0)
             {
                 double span = (now - sessionStart) / freq;
-                if (span < MinSpanSec) span = MinSpanSec;
+                if (span < minSpanSec) span = minSpanSec;
                 if (span > WindowSec) span = WindowSec;
                 target = events.Count / span * 60.0;
             }
@@ -193,7 +201,7 @@ namespace ApmMeter
     {
         public bool Rank, Led, Messages, Info, Graph, BreakReminder;
         public int OffMinutes, LunchMinutes, BreakMinutes, Opacity, MaxGauge;
-        public double WindowSec;
+        public double WindowSec, StartSec;
         public bool HasPos; public int PosX, PosY;
         public string Theme, PortraitImage;   // 테마 키, 사용자 초상화 이미지 경로
         public int Portrait;                  // 0 끄기, 1 테마 애니메이션, 2 사용자 이미지
@@ -215,6 +223,7 @@ namespace ApmMeter
             Opacity = 94;          // 투명도 (%)
             MaxGauge = 400;        // 게이지가 가득 차는 APM
             WindowSec = 5.0;       // APM 평균 시간 (초)
+            StartSec = 2.5;        // 시작 완충 (초)
             HasPos = false;
             Theme = "classic";     // 테마 (클래식이 기본)
             Portrait = 1;          // 초상화: 테마 애니메이션
@@ -225,7 +234,7 @@ namespace ApmMeter
         public void CopyFrom(Options o)
         {
             Rank = o.Rank; Led = o.Led; Messages = o.Messages; Info = o.Info; Graph = o.Graph; BreakReminder = o.BreakReminder;
-            OffMinutes = o.OffMinutes; LunchMinutes = o.LunchMinutes; BreakMinutes = o.BreakMinutes; Opacity = o.Opacity; MaxGauge = o.MaxGauge; WindowSec = o.WindowSec;
+            OffMinutes = o.OffMinutes; LunchMinutes = o.LunchMinutes; BreakMinutes = o.BreakMinutes; Opacity = o.Opacity; MaxGauge = o.MaxGauge; WindowSec = o.WindowSec; StartSec = o.StartSec;
             HasPos = o.HasPos; PosX = o.PosX; PosY = o.PosY;
             Theme = o.Theme; Portrait = o.Portrait; PortraitImage = o.PortraitImage; AutoSave = o.AutoSave;
         }
@@ -273,6 +282,7 @@ namespace ApmMeter
             sb.AppendLine("Opacity=" + Opacity.ToString(ci) + "         ; 투명도 30~100 (%)");
             sb.AppendLine("MaxGauge=" + MaxGauge.ToString(ci) + "       ; 게이지가 가득 차는 APM");
             sb.AppendLine("WindowSec=" + WindowSec.ToString("0.#", ci) + "         ; APM 평균 시간 1~30 (초)");
+            sb.AppendLine("StartSec=" + StartSec.ToString("0.#", ci) + "        ; 시작 완충 0.5~10 (초). 클수록 첫 몇 타에 덜 튐");
             sb.AppendLine();
             sb.AppendLine("[저장]");
             sb.AppendLine("AutoSave=" + B(AutoSave) + "          ; 종료할 때 자동 저장");
@@ -321,6 +331,7 @@ namespace ApmMeter
                         case "breakminutes": if (int.TryParse(v, out iv)) t.BreakMinutes = Math.Max(10, Math.Min(180, iv)); break;
                         case "opacity": if (int.TryParse(v, out iv)) t.Opacity = Math.Max(30, Math.Min(100, iv)); break;
                         case "maxgauge": if (int.TryParse(v, out iv)) t.MaxGauge = Math.Max(100, Math.Min(2000, iv)); break;
+                        case "startsec": if (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out dv)) t.StartSec = Math.Max(0.5, Math.Min(10, dv)); break;
                         case "windowsec": if (double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out dv)) t.WindowSec = Math.Max(1, Math.Min(30, dv)); break;
                         case "posx": if (int.TryParse(v, out iv)) { t.PosX = iv; hasX = true; } break;
                         case "posy": if (int.TryParse(v, out iv)) { t.PosY = iv; hasY = true; } break;
@@ -784,6 +795,7 @@ namespace ApmMeter
             ApplyPosition();
             Opacity = opt.Opacity / 100.0;
             engine.WindowSec = opt.WindowSec;
+            engine.MinSpanSec = opt.StartSec;
 
             stuckResetTicks = engine.SecondsToTicks(1.0);
             ledTicks = engine.SecondsToTicks(0.09);
@@ -875,6 +887,7 @@ namespace ApmMeter
         {
             Opacity = opt.Opacity / 100.0;
             engine.WindowSec = opt.WindowSec;
+            engine.MinSpanSec = opt.StartSec;
             off10 = false; off0 = false; lunch10 = false; lunch0 = false;
             th = Theme.Get(opt.Theme);
             LoadCustomPortrait();
@@ -1527,7 +1540,7 @@ namespace ApmMeter
         Label lImage;
         CheckBox cRank, cLed, cMsg, cInfo, cGraph, cBreak, cAuto;
         DateTimePicker dOff, dLunch;
-        NumericUpDown nBreak, nGauge, nWindow;
+        NumericUpDown nBreak, nGauge, nWindow, nStart;
         TrackBar tOpacity;
         Label lOpacity, lStatus;
         bool loading;
@@ -1543,7 +1556,7 @@ namespace ApmMeter
             MaximizeBox = false; MinimizeBox = false; ShowInTaskbar = false; TopMost = true;
             StartPosition = FormStartPosition.Manual;
             BackColor = Bg; ForeColor = Fg;
-            ClientSize = new Size(744, 440);
+            ClientSize = new Size(744, 466);
 
             // ---- 왼쪽: 디자인 · 표시 ----
             Head("디자인", 16, 14);
@@ -1591,15 +1604,18 @@ namespace ApmMeter
             nGauge = Num(100, 2000, 50, 0, RX + 144, 214);
             Lbl("APM 평균 시간 (초)", RX + 10, 252, Fg);
             nWindow = Num(1, 30, 0.5m, 1, RX + 144, 248);
-            Lbl("짧으면 빨리 반응하고 빨리 떨어지고, 길면 묵직하게 움직입니다.", RX + 10, 280, Dim);
-            cAuto = Check("종료할 때 설정 자동 저장", RX + 10, 302, 330);
+            Lbl("시작 완충 (초)", RX + 10, 284, Fg);
+            nStart = Num(0.5m, 10, 0.5m, 1, RX + 144, 280);
+            Lbl("클수록 첫 몇 타에 덜 튐", RX + 240, 284, Dim);
+            Lbl("평균 시간이 짧으면 빨리 반응하고 빨리 떨어지고, 길면 묵직합니다.", RX + 10, 310, Dim);
+            cAuto = Check("종료할 때 설정 자동 저장", RX + 10, 330, 330);
 
             // ---- 아래: 버튼 · 상태 ----
-            Panel sep = new Panel(); sep.BackColor = Color.FromArgb(40, 70, 44); sep.SetBounds(16, 336, 712, 1); Controls.Add(sep);
-            Button bSave = Btn("설정 저장", 16, 350, 110, true);
-            Button bLoad = Btn("설정 불러오기…", 132, 350, 130, false);
-            Button bReset = Btn("기본값", 268, 350, 96, false);
-            Button bClose = Btn("닫기", 648, 350, 80, false);
+            Panel sep = new Panel(); sep.BackColor = Color.FromArgb(40, 70, 44); sep.SetBounds(16, 362, 712, 1); Controls.Add(sep);
+            Button bSave = Btn("설정 저장", 16, 376, 110, true);
+            Button bLoad = Btn("설정 불러오기…", 132, 376, 130, false);
+            Button bReset = Btn("기본값", 268, 376, 96, false);
+            Button bClose = Btn("닫기", 648, 376, 80, false);
             bSave.Click += delegate
             {
                 string m; bool ok = owner.SaveSettings(out m);
@@ -1627,7 +1643,7 @@ namespace ApmMeter
             CancelButton = bClose;
 
             lStatus = new Label();
-            lStatus.AutoSize = false; lStatus.SetBounds(16, 390, 712, 44); lStatus.ForeColor = Dim; lStatus.BackColor = Bg;
+            lStatus.AutoSize = false; lStatus.SetBounds(16, 416, 712, 44); lStatus.ForeColor = Dim; lStatus.BackColor = Bg;
             Controls.Add(lStatus);
 
             AutoScaleDimensions = new SizeF(96f, 96f);
@@ -1745,6 +1761,7 @@ namespace ApmMeter
             lOpacity.Text = opt.Opacity + "%";
             nGauge.Value = Math.Max(nGauge.Minimum, Math.Min(nGauge.Maximum, opt.MaxGauge));
             nWindow.Value = Math.Max(nWindow.Minimum, Math.Min(nWindow.Maximum, (decimal)opt.WindowSec));
+            nStart.Value = Math.Max(nStart.Minimum, Math.Min(nStart.Maximum, (decimal)opt.StartSec));
             loading = false;
         }
 
@@ -1762,6 +1779,7 @@ namespace ApmMeter
             opt.Opacity = tOpacity.Value;
             opt.MaxGauge = (int)nGauge.Value;
             opt.WindowSec = (double)nWindow.Value;
+            opt.StartSec = (double)nStart.Value;
             lOpacity.Text = opt.Opacity + "%";
             owner.ApplyOptions();
             if (sender == cPortrait && opt.Portrait == 2)
